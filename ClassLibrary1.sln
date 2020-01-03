@@ -3,7 +3,9 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 15
 VisualStudioVersion = 15.0.28307.960
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "ClassLibrary1", "ClassLibrary1\ClassLibrary1.csproj", "{6ECC5879-AC51-48B6-8257-59ADEFF443C6}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BadECS", "ClassLibrary1\BadECS.csproj", "{6ECC5879-AC51-48B6-8257-59ADEFF443C6}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "BadECSTests", "UnitTestProject1\BadECSTests.csproj", "{45824ADB-3701-4680-9CCB-C46846098239}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
@@ -15,6 +17,10 @@ Global
 		{6ECC5879-AC51-48B6-8257-59ADEFF443C6}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{6ECC5879-AC51-48B6-8257-59ADEFF443C6}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{6ECC5879-AC51-48B6-8257-59ADEFF443C6}.Release|Any CPU.Build.0 = Release|Any CPU
+		{45824ADB-3701-4680-9CCB-C46846098239}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{45824ADB-3701-4680-9CCB-C46846098239}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{45824ADB-3701-4680-9CCB-C46846098239}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{45824ADB-3701-4680-9CCB-C46846098239}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(SolutionProperties) = preSolution
 		HideSolutionNode = FALSE
