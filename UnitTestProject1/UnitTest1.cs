@@ -12,16 +12,12 @@ namespace UnitTestProject1
         [TestMethod]
         public void TestMethod1()
         {
-            World world = new World();
-            world.RegisterComponent(typeof(Tag), typeof(NullList<Tag>));
-            Assert.AreEqual(1, world.componentLUT.Count);
+
         }
 
         [TestMethod]
         public void TestMethod2()
         {
-            World world = new World();
-            world.RegisterComponent(typeof(Tag), typeof(NullList<Tag>));
             
         }
     }
@@ -33,3 +29,8 @@ public struct TestStruct : IComponent
 }
 
 public struct Tag : IComponent { }
+
+public struct TestMethod
+{
+    
+}

@@ -3,6 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
 
+#region Storages
+
 public interface IIndexed { }
 
 public interface IIndexed<T> : IIndexed
@@ -348,29 +350,131 @@ public class NullList<T> : IIndexed<T>
     }
 }
 
+#endregion
+
+/// <summary>
+/// The tag that all structs need in order to be recognized by the ECS system.
+/// Can be used on classes as well, but this will incur a large performance hit.
+/// </summary>
 public interface IComponent{};
 
-public struct Entity
+/// <summary>
+/// Contains the array position for all components of the entity, as well as it's generation number.
+/// </summary>
+public struct Entity : IEquatable<Entity>, IComponent
 {
     public int id;
     public int generation;
+
+    public override bool  Equals(Object o)
+    {
+        Entity e = (Entity)o;
+        return e.generation == this.generation && e.id == this.id;
+    }
+
+    public bool Equals(Entity other)
+    {
+        return id == other.id &&
+               generation == other.generation;
+    }
+
+    public override int GetHashCode()
+    {
+        return HashCode.Combine(id, generation);
+    }
+
+    static public bool operator ==(Entity e1, Entity e2)
+    {
+        return e1.Equals(e2);
+    }
+
+    static public bool operator !=(Entity e1, Entity e2)
+    {
+        return e1.Equals(e2);
+    }
+}
+
+public interface ISystem
+{
+    Type[] compRead { get; }
+    Type[] compWrite { get; }
+    Type[] compExclude { get; }
+    Type[] rescRead { get; }
+    Type[] rescWrite { get; }
+
+    void OnCreate();
+    void OnDestroy();
+    void OnUpdate();
+    void OnStart();
+    void OnStop();
+}
+
+public class SystemDataFilter: IEnumerable
+{
+    private Dictionary<Type, IIndexed<IComponent>> compRead;
+    private Dictionary<Type, IIndexed<IComponent>> compWrite;
+    private Dictionary<Type, IComponent> rescRead;
+    private Dictionary<Type, IComponent> rescWrite;
+
+    public IIndexed<T> GetReadableCompStorage<T>()
+    {
+        return (IIndexed<T>)compRead[typeof(T)];
+    }
+
+    public IIndexed<T> GetWritableStorage<T>()
+    {
+        return (IIndexed<T>)compWrite[typeof(T)];
+    }
+
+    public T GetReadableResc<T>()
+    {
+        return (T)rescRead[typeof(T)];
+    }
+
+    public T GetWritableResc<T>()
+    {
+        return (T)rescWrite[typeof(T)];
+    }
+
+    public IEnumerator GetEnumerator()
+    {
+        throw new NotImplementedException();
+    }
+}
+
+public class SystemDataFilterEnumerator : IEnumerator
+{
+    private int i;
+    public object Current => i;
+
+    public bool MoveNext()
+    {
+        throw new NotImplementedException();
+    }
+
+    public void Reset()
+    {
+        i = 0;
+    }
 }
 
 public class World
 {
 
-    public Dictionary<Type, IIndexed<IComponent>> componentLUT;
-    public Dictionary<Type, IComponent> resourceLUT;
-
-    public List<Entity> entities;
+    private Dictionary<Type, IIndexed<IComponent>> componentLUT;
+    private Dictionary<Type, IComponent> resourceLUT;
+    
     public Queue<Entity> deletedEntities;
+
+    public List<List<ISystem>> systems;
 
     public World()
     {
         componentLUT = new Dictionary<Type, IIndexed<IComponent>>();
         resourceLUT = new Dictionary<Type, IComponent>();
 
-        entities = new List<Entity>();
+        IIndexed<Entity> test = new IndexList<Entity>();
+        componentLUT.Add(typeof(Entity), test);
         deletedEntities = new Queue<Entity>();
     }
 
