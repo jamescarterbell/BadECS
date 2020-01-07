@@ -12,7 +12,7 @@ namespace UnitTestProject1
         [TestMethod]
         public void TestMethod1()
         {
-
+            World world = new World();
         }
 
         [TestMethod]
@@ -21,16 +21,4 @@ namespace UnitTestProject1
             
         }
     }
-}
-
-public struct TestStruct : IComponent
-{
-    public string Name;
-}
-
-public struct Tag : IComponent { }
-
-public struct TestMethod
-{
-    
 }

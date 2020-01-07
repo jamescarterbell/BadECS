@@ -2,6 +2,7 @@
 using System.Collections;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 
 #region Storages
 
@@ -11,6 +12,7 @@ public interface IIndexed<T> : IIndexed
 {
     T this[int index] { get; set; }
     BitArray validBits { get; }
+    Density density { get; }
     int Count { get; }
     void Clear();
     bool Contains(T item);
@@ -28,6 +30,7 @@ public class HashList<T> : IIndexed<T>
 {
     private Dictionary<int, T> m_dict;
     private BitArray m_bitArray;
+    Density IIndexed<T>.density => Density.sparse;
 
     /// <summary>
     /// Create a new HashList
@@ -76,6 +79,7 @@ public class HashList<T> : IIndexed<T>
             return m_dict.Count;
         }
     }
+
 
     /// <summary>
     /// Remove all items from the list
@@ -159,6 +163,7 @@ public class IndexList<T> : IIndexed<T>
 {
     private List<T> m_list;
     private BitArray m_bitArray;
+    Density IIndexed<T>.density => Density.dense;
 
     /// <summary>
     /// Create a new IndexList
@@ -292,6 +297,7 @@ public class NullList<T> : IIndexed<T>
 {
     private BitArray m_bitArray;
     private int count;
+    Density IIndexed<T>.density => Density.non;
 
     public NullList()
     {
@@ -350,6 +356,11 @@ public class NullList<T> : IIndexed<T>
     }
 }
 
+public enum Density
+{
+    dense = 2, sparse = 1, non = 0
+}
+
 #endregion
 
 /// <summary>
@@ -358,13 +369,20 @@ public class NullList<T> : IIndexed<T>
 /// </summary>
 public interface IComponent{};
 
+#region Entities
 /// <summary>
 /// Contains the array position for all components of the entity, as well as it's generation number.
 /// </summary>
-public struct Entity : IEquatable<Entity>, IComponent
+public struct Entity : IEquatable<Entity>
 {
     public int id;
     public int generation;
+
+    internal Entity(int _gen, int _id)
+    {
+        generation = _gen;
+        id = _id;
+    }
 
     public override bool  Equals(Object o)
     {
@@ -394,36 +412,188 @@ public struct Entity : IEquatable<Entity>, IComponent
     }
 }
 
+public class EntityManager
+{
+    private IndexList<Entity> entities;
+    private Queue<Entity> deletedEntities;
+    private World world;
+    private int currentEntity;
+
+    internal EntityManager(World _world)
+    {
+        world = _world;
+        entities = new IndexList<Entity>();
+        deletedEntities = new Queue<Entity>();
+        currentEntity = 0;
+    }
+
+    public EntityConstructor NewEntity(Dictionary<Type, IIndexed<IComponent>> compWrite, Dictionary<Type, IIndexed<IComponent>> compAddable)
+    {
+        Entity newEntity;
+        if(deletedEntities.Count > 0)
+        {
+            newEntity = deletedEntities.Dequeue();
+            newEntity.generation++;
+        }
+        else
+        {
+            newEntity = new Entity(0, ++currentEntity);
+        }
+        entities.Insert(currentEntity, newEntity);
+        return new EntityConstructor(currentEntity, compWrite, compAddable);
+    }
+
+    public EntityConstructor AddToEntity(int i, Dictionary<Type, IIndexed<IComponent>> compWrite, Dictionary<Type, IIndexed<IComponent>> compAddable)
+    {
+        return new EntityConstructor(i, compWrite, compAddable);
+    }
+
+    public void DestroyEntity(int i)
+    {
+        foreach(IIndexed<IComponent> indexed in world.componentLUT.Values)
+        {
+            indexed.Remove(i);
+        }
+        deletedEntities.Enqueue(entities[i]);
+        entities.Remove(i);
+    }
+
+    public void DestroyEntity(Entity e)
+    {
+        int index = e.id;
+        foreach (IIndexed<IComponent> indexed in world.componentLUT.Values)
+        {
+            indexed.Remove(index);
+        }
+        deletedEntities.Enqueue(entities[index]);
+        entities.Remove(index);
+    }
+}
+
+public class EntityConstructor
+{
+    private int i;
+    private Dictionary<Type, IIndexed<IComponent>> compWrite;
+    private Dictionary<Type, IIndexed<IComponent>> compAddable;
+
+    internal EntityConstructor(int _i, Dictionary<Type, IIndexed<IComponent>> _compWrite, Dictionary<Type, IIndexed<IComponent>> _compAddable)
+    {
+        compAddable = _compAddable;
+        compWrite = _compWrite;
+        i = _i;
+    }
+
+    public EntityConstructor With<T>(T component)
+    {
+        if(compAddable.ContainsKey(typeof(T)))
+            compAddable[typeof(T)].Insert(i, (IComponent)component);
+        else
+            compWrite[typeof(T)].Insert(i, (IComponent)component);
+        return this;
+    }
+
+    public EntityConstructor Remove<T>(T component)
+    {
+        compWrite[typeof(T)].Remove(i);
+        return this;
+    }
+}
+
+#endregion
+
+#region Systems
+
 public interface ISystem
 {
     Type[] compRead { get; }
     Type[] compWrite { get; }
+    Type[] compAddable { get; }
     Type[] compExclude { get; }
     Type[] rescRead { get; }
     Type[] rescWrite { get; }
+    bool entityAccess { get; }
+    bool entityDeleteAccess { get; }
 
-    void OnCreate();
-    void OnDestroy();
-    void OnUpdate();
-    void OnStart();
-    void OnStop();
+    void Create();
+    void Destroy();
+    void Update(SystemDataFilter filter);
+    void Start();
+    void Stop();
 }
 
-public class SystemDataFilter: IEnumerable
+public class SystemDataFilter: IEnumerator
 {
     private Dictionary<Type, IIndexed<IComponent>> compRead;
     private Dictionary<Type, IIndexed<IComponent>> compWrite;
+    private Dictionary<Type, IIndexed<IComponent>> compAddable;
     private Dictionary<Type, IComponent> rescRead;
     private Dictionary<Type, IComponent> rescWrite;
+    private BitArray validEntities;
+    private bool entityAccess;
+    private bool entityDeleteAccess;
+    private EntityManager entityManager;
 
-    public IIndexed<T> GetReadableCompStorage<T>()
+    private int i;
+    public object Current => GetCurrentEntity();
+
+    internal SystemDataFilter(World _world, Type[] _compRead, Type[] _compWrite, Type[] _compAddable, Type[] _compExclude, Type[] _rescRead, Type[] _rescWrite, bool _entityAccess, bool _entityDeleteAccess)
     {
-        return (IIndexed<T>)compRead[typeof(T)];
+        compRead = new Dictionary<Type, IIndexed<IComponent>>();
+        compWrite = new Dictionary<Type, IIndexed<IComponent>>();
+        compAddable = new Dictionary<Type, IIndexed<IComponent>>();
+        rescRead = new Dictionary<Type, IComponent>();
+        rescWrite = new Dictionary<Type, IComponent>();
+
+        entityAccess = _entityAccess;
+        entityDeleteAccess = _entityDeleteAccess;
+        if(entityAccess || entityDeleteAccess)
+        {
+            entityManager = _world.entityManager;
+        }
+        
+        foreach(Type t in _compRead)
+        {
+            compRead.Add(t, _world.componentLUT[t]);
+            validEntities = (validEntities ?? compRead[t].validBits).And(compRead[t].validBits);
+        }
+        foreach (Type t in _compWrite)
+        {
+            compWrite.Add(t, _world.componentLUT[t]);
+            validEntities = (validEntities ?? compWrite[t].validBits).And(compWrite[t].validBits);
+        }
+        foreach (Type t in _compAddable)
+        {
+            compAddable.Add(t, _world.componentLUT[t]);
+        }
+        foreach (Type t in _compExclude)
+        {
+            validEntities = (validEntities ?? _world.componentLUT[t].validBits.Not()).And(_world.componentLUT[t].validBits.Not());
+        }
+        foreach (Type t in _rescRead)
+        {
+            rescRead.Add(t, _world.resourceLUT[t]);
+        }
+        foreach (Type t in _rescWrite)
+        {
+            rescWrite.Add(t, _world.resourceLUT[t]);
+        }
+
+        Reset();
     }
 
-    public IIndexed<T> GetWritableStorage<T>()
+    public T GetReadableComp<T>()
     {
-        return (IIndexed<T>)compWrite[typeof(T)];
+        return (T)compRead[typeof(T)][i];
+    }
+
+    public T GetWritableComp<T>()
+    {
+        return (T)compWrite[typeof(T)][i];
+    }
+
+    public void SetWritableComp<T>(T set)
+    {
+        compWrite[typeof(T)][i] = (IComponent)set;
     }
 
     public T GetReadableResc<T>()
@@ -436,64 +606,127 @@ public class SystemDataFilter: IEnumerable
         return (T)rescWrite[typeof(T)];
     }
 
-    public IEnumerator GetEnumerator()
+    public void SetWritableResc<T>(T set)
     {
-        throw new NotImplementedException();
+        rescWrite[typeof(T)] = (IComponent)set;
     }
-}
 
-public class SystemDataFilterEnumerator : IEnumerator
-{
-    private int i;
-    public object Current => i;
+    public EntityConstructor GetCurrentEntity()
+    {
+        if (entityAccess) return entityManager.AddToEntity(i, compWrite, compAddable);
+        throw new NoEntityAccessError();
+    }
+
+    public EntityConstructor CreateNewEntity()
+    {
+        if (entityAccess) return entityManager.NewEntity(compWrite, compAddable);
+        throw new NoEntityAccessError();
+    }
+
+    public void DestroyCurrentEntity()
+    {
+        if(entityDeleteAccess) entityManager.DestroyEntity(i);
+        throw new NoEntityDeleteAccessError();
+    }
+
+    public void DestroyEntity(Entity e)
+    {
+        if (entityDeleteAccess) entityManager.DestroyEntity(e);
+        throw new NoEntityDeleteAccessError();
+    }
 
     public bool MoveNext()
     {
-        throw new NotImplementedException();
+        do
+        {
+            i++;
+        }while (!validEntities[i] && i < validEntities.Count) ;
+        if(i < validEntities.Count)
+            return true;
+        return false;
     }
 
     public void Reset()
     {
-        i = 0;
+        i = -1;
+        MoveNext();
     }
 }
 
+public class SystemCollection
+{
+    internal List<ISystem> systems;
+
+    internal Dictionary<Type, IIndexed<IComponent>> components;
+    internal Dictionary<Type, IComponent> resources;
+
+    public void RegisterComponent<T, U>()
+        where T : IIndexed<U>, new()
+        where U : IComponent
+    {
+        components.Add(typeof(U), new T() as IIndexed<IComponent>);
+    }
+}
+
+public class NoEntityAccessError : Exception{};
+public class NoEntityDeleteAccessError : Exception { };
+
+#endregion
+
 public class World
 {
+    internal Dictionary<Type, IIndexed<IComponent>> componentLUT;
+    internal Dictionary<Type, IComponent> resourceLUT;
 
-    private Dictionary<Type, IIndexed<IComponent>> componentLUT;
-    private Dictionary<Type, IComponent> resourceLUT;
+    internal EntityManager entityManager;
     
-    public Queue<Entity> deletedEntities;
-
-    public List<List<ISystem>> systems;
 
     public World()
     {
         componentLUT = new Dictionary<Type, IIndexed<IComponent>>();
         resourceLUT = new Dictionary<Type, IComponent>();
 
-        IIndexed<Entity> test = new IndexList<Entity>();
-        componentLUT.Add(typeof(Entity), test);
-        deletedEntities = new Queue<Entity>();
+        entityManager = new EntityManager(this);
     }
 
-    public void RegisterComponent(Type type, Type storageType)
+    public void RegisterComponent<T, U>()
+        where T: IIndexed<U>, new()
+        where U: IComponent
     {
-        if (!type.GetInterfaces().Contains(typeof(IComponent)))
-            throw new NotComponentException();
-        if (!storageType.GetInterfaces().Contains(typeof(IIndexed)))
-            throw new NotIIndexedException();
-        componentLUT.Add(type, Activator.CreateInstance(storageType) as IIndexed<IComponent>);
+        T newStorage = new T();
+        if (componentLUT.ContainsKey(typeof(U)))
+        {
+            componentLUT[typeof(U)] = (newStorage.density > componentLUT[typeof(U)].density) ? newStorage as IIndexed<IComponent> : componentLUT[typeof(U)];
+        }
+        else
+        {
+            componentLUT.Add(typeof(U), new T() as IIndexed<IComponent>);
+        }
     }
-}
 
-public class NotComponentException: Exception
-{
+    public void RegisterResource<T>()
+        where T: IComponent, new()
+    {
+        if(!resourceLUT.ContainsKey(typeof(T)))
+            resourceLUT.Add(typeof(T), new T());
+    }
 
-}
-
-public class NotIIndexedException: Exception
-{
-
+    internal void RunUpdateSystems(ISystem[] systems)
+    {
+        List<Thread> threads = new List<Thread>();
+        foreach(ISystem s in systems)
+        {
+            SystemDataFilter sFilter = new SystemDataFilter(this, s.compRead, s.compWrite, s.compAddable, s.compExclude, s.rescRead, s.rescWrite, s.entityAccess, s.entityDeleteAccess);
+            Thread sThread = new Thread(delegate ()
+            {
+                s.Update(sFilter);
+            });
+            sThread.Start();
+            threads.Add(sThread);
+        }
+        foreach(Thread t in threads)
+        {
+            t.Join();
+        }
+    }
 }
