@@ -416,12 +416,12 @@ public class EntityManager
 {
     private IndexList<Entity> entities;
     private Queue<Entity> deletedEntities;
-    private World world;
+    private SystemCollection systemCollection;
     private int currentEntity;
 
-    internal EntityManager(World _world)
+    internal EntityManager(SystemCollection _systemCollection)
     {
-        world = _world;
+        systemCollection = _systemCollection;
         entities = new IndexList<Entity>();
         deletedEntities = new Queue<Entity>();
         currentEntity = 0;
@@ -450,7 +450,7 @@ public class EntityManager
 
     public void DestroyEntity(int i)
     {
-        foreach(IIndexed<IComponent> indexed in world.componentLUT.Values)
+        foreach(IIndexed<IComponent> indexed in systemCollection.componentLUT.Values)
         {
             indexed.Remove(i);
         }
@@ -461,12 +461,32 @@ public class EntityManager
     public void DestroyEntity(Entity e)
     {
         int index = e.id;
-        foreach (IIndexed<IComponent> indexed in world.componentLUT.Values)
+        foreach (IIndexed<IComponent> indexed in systemCollection.componentLUT.Values)
         {
             indexed.Remove(index);
         }
         deletedEntities.Enqueue(entities[index]);
         entities.Remove(index);
+    }
+
+    /// <summary>
+    /// Used to add entities outside of systems
+    /// </summary>
+    /// <returns>The entity constructor, used to add new components to an entity</returns>
+    public EntityConstructor AddEntity()
+    {
+        Entity newEntity;
+        if (deletedEntities.Count > 0)
+        {
+            newEntity = deletedEntities.Dequeue();
+            newEntity.generation++;
+        }
+        else
+        {
+            newEntity = new Entity(0, ++currentEntity);
+        }
+        entities.Insert(currentEntity, newEntity);
+        return new EntityConstructor(currentEntity, systemCollection.componentLUT, systemCollection.componentLUT);
     }
 }
 
@@ -513,12 +533,8 @@ public interface ISystem
     Type[] rescWrite { get; }
     bool entityAccess { get; }
     bool entityDeleteAccess { get; }
-
-    void Create();
-    void Destroy();
+    
     void Update(SystemDataFilter filter);
-    void Start();
-    void Stop();
 }
 
 public class SystemDataFilter: IEnumerator
@@ -527,16 +543,16 @@ public class SystemDataFilter: IEnumerator
     private Dictionary<Type, IIndexed<IComponent>> compWrite;
     private Dictionary<Type, IIndexed<IComponent>> compAddable;
     private Dictionary<Type, IComponent> rescRead;
-    private Dictionary<Type, IComponent> rescWrite;
+    internal Dictionary<Type, IComponent> rescWrite;
     private BitArray validEntities;
     private bool entityAccess;
     private bool entityDeleteAccess;
     private EntityManager entityManager;
-
+    
     private int i;
     public object Current => GetCurrentEntity();
 
-    internal SystemDataFilter(World _world, Type[] _compRead, Type[] _compWrite, Type[] _compAddable, Type[] _compExclude, Type[] _rescRead, Type[] _rescWrite, bool _entityAccess, bool _entityDeleteAccess)
+    internal SystemDataFilter(SystemCollection _sysCollection, Type[] _compRead, Type[] _compWrite, Type[] _compAddable, Type[] _compExclude, Type[] _rescRead, Type[] _rescWrite, bool _entityAccess, bool _entityDeleteAccess)
     {
         compRead = new Dictionary<Type, IIndexed<IComponent>>();
         compWrite = new Dictionary<Type, IIndexed<IComponent>>();
@@ -548,34 +564,35 @@ public class SystemDataFilter: IEnumerator
         entityDeleteAccess = _entityDeleteAccess;
         if(entityAccess || entityDeleteAccess)
         {
-            entityManager = _world.entityManager;
+            entityManager = _sysCollection.entityManager;
         }
         
         foreach(Type t in _compRead)
         {
-            compRead.Add(t, _world.componentLUT[t]);
+            compRead.Add(t, _sysCollection.componentLUT[t]);
             validEntities = (validEntities ?? compRead[t].validBits).And(compRead[t].validBits);
         }
         foreach (Type t in _compWrite)
         {
-            compWrite.Add(t, _world.componentLUT[t]);
+            compWrite.Add(t, _sysCollection.componentLUT[t]);
             validEntities = (validEntities ?? compWrite[t].validBits).And(compWrite[t].validBits);
         }
         foreach (Type t in _compAddable)
         {
-            compAddable.Add(t, _world.componentLUT[t]);
+            compAddable.Add(t, _sysCollection.componentLUT[t]);
         }
         foreach (Type t in _compExclude)
         {
-            validEntities = (validEntities ?? _world.componentLUT[t].validBits.Not()).And(_world.componentLUT[t].validBits.Not());
+            if (_sysCollection.componentLUT.ContainsKey(t))
+                validEntities = (validEntities ?? _sysCollection.componentLUT[t].validBits.Not()).And(_sysCollection.componentLUT[t].validBits.Not());
         }
         foreach (Type t in _rescRead)
         {
-            rescRead.Add(t, _world.resourceLUT[t]);
+            rescRead.Add(t, _sysCollection.resourceLUT[t]);
         }
         foreach (Type t in _rescWrite)
         {
-            rescWrite.Add(t, _world.resourceLUT[t]);
+            rescWrite.Add(t, _sysCollection.resourceLUT[t]);
         }
 
         Reset();
@@ -594,6 +611,11 @@ public class SystemDataFilter: IEnumerator
     public void SetWritableComp<T>(T set)
     {
         compWrite[typeof(T)][i] = (IComponent)set;
+    }
+
+    public void RemoveWritableComp<T>()
+    {
+        compWrite[typeof(T)].Remove(i);
     }
 
     public T GetReadableResc<T>()
@@ -637,10 +659,11 @@ public class SystemDataFilter: IEnumerator
 
     public bool MoveNext()
     {
+        if (validEntities == null) return false;
         do
         {
             i++;
-        }while (!validEntities[i] && i < validEntities.Count) ;
+        }while (i < validEntities.Count && !validEntities[i]) ;
         if(i < validEntities.Count)
             return true;
         return false;
@@ -653,45 +676,100 @@ public class SystemDataFilter: IEnumerator
     }
 }
 
-public class SystemCollection
+internal class SystemDependencies
 {
-    internal List<ISystem> systems;
+    internal ISystem system;
+    internal List<ISystem> dependencies;
 
-    internal Dictionary<Type, IIndexed<IComponent>> components;
-    internal Dictionary<Type, IComponent> resources;
-
-    public void RegisterComponent<T, U>()
-        where T : IIndexed<U>, new()
-        where U : IComponent
+    internal SystemDependencies(ISystem _system, params ISystem[] _dependencies)
     {
-        components.Add(typeof(U), new T() as IIndexed<IComponent>);
+        system = _system;
+        dependencies = new List<ISystem>(_dependencies);
+    }
+
+    internal SystemDependencies AddDependencies(IEnumerable<ISystem> _dependencies)
+    {
+        dependencies.AddRange(_dependencies);
+        return this;
     }
 }
 
-public class NoEntityAccessError : Exception{};
-public class NoEntityDeleteAccessError : Exception { };
-
-#endregion
-
-public class World
+public class SystemCollection
 {
+    internal Dictionary<ISystem, SystemDependencies> systems;
+    private List<List<ISystem>> scheduledSystems;
+
     internal Dictionary<Type, IIndexed<IComponent>> componentLUT;
     internal Dictionary<Type, IComponent> resourceLUT;
 
     internal EntityManager entityManager;
-    
 
-    public World()
+    public event Action<EntityManager> OnStart;
+
+    public SystemCollection()
     {
+        systems = new Dictionary<ISystem, SystemDependencies>();
+        scheduledSystems = new List<List<ISystem>>();
+
         componentLUT = new Dictionary<Type, IIndexed<IComponent>>();
         resourceLUT = new Dictionary<Type, IComponent>();
 
         entityManager = new EntityManager(this);
     }
+    
+    /// <summary>
+    /// Used to combine multiple systemCollections into one large dispatcher
+    /// </summary>
+    /// <param name="addedCollection"></param>
+    /// <param name="collectionDependencies"></param>
+    public void AddSystemCollection(SystemCollection addedCollection, params SystemCollection[] collectionDependencies)
+    {
+        //Register the new components
+        foreach(KeyValuePair<Type, IIndexed<IComponent>> kvp in addedCollection.componentLUT)
+        {
+            IIndexed<IComponent> newStorage = (IIndexed<IComponent>)Activator.CreateInstance(kvp.Value.GetType());
+            if (componentLUT.ContainsKey(kvp.Key))
+            {
+                componentLUT[kvp.Key] = (newStorage.density > componentLUT[kvp.Key].density) ? newStorage as IIndexed<IComponent> : componentLUT[kvp.Key];
+            }
+            else
+            {
+                componentLUT.Add(kvp.Key, (IIndexed<IComponent>)Activator.CreateInstance(kvp.Value.GetType()));
+            }
+        }
 
+        //Register the new resources
+        foreach(KeyValuePair<Type, IComponent> kvp in addedCollection.resourceLUT)
+        {
+            if (!resourceLUT.ContainsKey(kvp.Key))
+                resourceLUT.Add(kvp.Key, kvp.Value);
+        }
+
+        //Register the new systems
+        foreach (KeyValuePair<ISystem, SystemDependencies> kvp in addedCollection.systems)
+        {
+            List<ISystem> depends = new List<ISystem>();
+            foreach(SystemCollection SC in collectionDependencies)
+                foreach(ISystem SD in SC.systems.Keys)
+                {
+                    depends.Add(SD);
+                }
+            depends.AddRange(kvp.Value.dependencies);
+            RegisterSystem(kvp.Key, depends.ToArray());
+        }
+
+        //Combine startup events
+        OnStart += addedCollection.OnStart;
+    }
+
+    /// <summary>
+    /// Add a blank collection of components to the system collection
+    /// </summary>
+    /// <typeparam name="T">Collection type</typeparam>
+    /// <typeparam name="U">Component type</typeparam>
     public void RegisterComponent<T, U>()
-        where T: IIndexed<U>, new()
-        where U: IComponent
+        where T : IIndexed<U>, new()
+        where U : IComponent
     {
         T newStorage = new T();
         if (componentLUT.ContainsKey(typeof(U)))
@@ -704,29 +782,266 @@ public class World
         }
     }
 
-    public void RegisterResource<T>()
-        where T: IComponent, new()
+    /// <summary>
+    /// Add a blank collection of components to the system collection
+    /// </summary>
+    /// <typeparam name="T">Collection type</typeparam>
+    /// <typeparam name="U">Component type</typeparam>
+    public void RegisterComponent<T, U>(T storage, U component)
+        where T : IIndexed<U>, new()
+        where U : IComponent
     {
-        if(!resourceLUT.ContainsKey(typeof(T)))
+        T newStorage = new T();
+        if (componentLUT.ContainsKey(typeof(U)))
+        {
+            componentLUT[typeof(U)] = (newStorage.density > componentLUT[typeof(U)].density) ? newStorage as IIndexed<IComponent> : componentLUT[typeof(U)];
+        }
+        else
+        {
+            componentLUT.Add(typeof(U), new T() as IIndexed<IComponent>);
+        }
+    }
+
+    /// <summary>
+    /// Add a resource to this system collection
+    /// </summary>
+    /// <typeparam name="T">Resource to register</typeparam>
+    public void RegisterResource<T>()
+        where T : IComponent, new()
+    {
+        if (!resourceLUT.ContainsKey(typeof(T)))
             resourceLUT.Add(typeof(T), new T());
     }
 
-    internal void RunUpdateSystems(ISystem[] systems)
+    /// <summary>
+    /// Add a specific resource to this system collection
+    /// </summary>
+    /// <typeparam name="T">Resource to register</typeparam>
+    /// <param name="resource">Instance of resource to add</param>
+    public void RegisterResource<T>(T resource)
+        where T : IComponent
+    {
+        if (!resourceLUT.ContainsKey(typeof(T)))
+            resourceLUT.Add(typeof(T), resource);
+    }
+
+    /// <summary>
+    /// Add a system to the system collection for scheduling and execution. All components the system uses must be registered before the system!
+    /// </summary>
+    /// <param name="system">System to add</param>
+    /// <param name="dependencies">What systems must run before this system</param>
+    public void RegisterSystem(ISystem system, params ISystem[] dependencies)
+    {
+        // Check to make sure that the system collection has all the necessary components allocated
+        foreach (Type t in system.compAddable)
+        {
+            if (!componentLUT.ContainsKey(t))
+            {
+                throw new UnregisteredComponentInSystem(t);
+            }
+        }
+        foreach (Type t in system.compRead)
+        {
+            if (!componentLUT.ContainsKey(t))
+            {
+                throw new UnregisteredComponentInSystem(t);
+            }
+        }
+        foreach (Type t in system.compWrite)
+        {
+            if (!componentLUT.ContainsKey(t))
+            {
+                throw new UnregisteredComponentInSystem(t);
+            }
+        }
+        foreach (Type t in system.rescRead)
+        {
+            if (!resourceLUT.ContainsKey(t))
+            {
+                throw new UnregisteredComponentInSystem(t);
+            }
+        }
+        foreach (Type t in system.rescWrite)
+        {
+            if (!resourceLUT.ContainsKey(t))
+            {
+                throw new UnregisteredComponentInSystem(t);
+            }
+        }
+
+        // Make sure the dependencies have been registered
+        foreach (ISystem s in dependencies)
+        {
+            if (!systems.ContainsKey(s)) throw new UnregisteredDependency(s);
+        }
+
+        // Register the systems and dependencies to be sorted later
+        systems.Add(system, new SystemDependencies(system, dependencies));
+    }
+
+    internal void ScheduleSystems()
+    {
+        Dictionary<ISystem, bool> done = new Dictionary<ISystem, bool>();
+        Queue<ISystem> sorted = new Queue<ISystem>();
+
+        foreach(ISystem s in systems.Keys)
+        {
+            done.Add(s, false);
+        }
+
+        foreach(SystemDependencies sd in systems.Values)
+        {
+            Sort(sd, sorted, done);
+        }
+
+        scheduledSystems = new List<List<ISystem>>();
+        HashSet<Type> compWrite = new HashSet<Type>();
+        HashSet<Type> rescWrite = new HashSet<Type>();
+        List<ISystem> sysGroup = new List<ISystem>();
+        do
+        {
+            ISystem sys = sorted.Dequeue();
+            foreach(Type t in sys.compRead)
+            {
+                if (compWrite.Contains(t))
+                {
+                    scheduledSystems.Add(sysGroup);
+                    sysGroup = new List<ISystem>();
+                }
+            }
+            foreach (Type t in sys.compWrite)
+            {
+                if (compWrite.Contains(t))
+                {
+                    scheduledSystems.Add(sysGroup);
+                    sysGroup = new List<ISystem>();
+                }
+            }
+            foreach (Type t in sys.rescRead)
+            {
+                if (rescWrite.Contains(t))
+                {
+                    scheduledSystems.Add(sysGroup);
+                    sysGroup = new List<ISystem>();
+                }
+            }
+            foreach (Type t in sys.rescWrite)
+            {
+                if (rescWrite.Contains(t))
+                {
+                    scheduledSystems.Add(sysGroup);
+                    sysGroup = new List<ISystem>();
+                }
+            }
+            foreach (Type t in sys.rescWrite)
+            {
+                rescWrite.Add(t);
+            }
+            foreach (Type t in sys.compWrite)
+            {
+                compWrite.Add(t);
+            }
+            sysGroup.Add(sys);
+        } while (sorted.Count > 0);
+        scheduledSystems.Add(sysGroup);
+    }
+
+    internal void Sort(SystemDependencies sys, Queue<ISystem> sorted, Dictionary<ISystem, bool> done)
+    {
+        if (done[sys.system]) return;
+        foreach(ISystem s in sys.dependencies)
+        {
+            Sort(systems[s], sorted, done);
+        }
+
+        done[sys.system] = true;
+        sorted.Enqueue(sys.system);
+    }
+
+    internal void RunUpdateSystemGroup(List<ISystem> systems)
     {
         List<Thread> threads = new List<Thread>();
-        foreach(ISystem s in systems)
+        foreach (ISystem s in systems)
         {
             SystemDataFilter sFilter = new SystemDataFilter(this, s.compRead, s.compWrite, s.compAddable, s.compExclude, s.rescRead, s.rescWrite, s.entityAccess, s.entityDeleteAccess);
             Thread sThread = new Thread(delegate ()
             {
                 s.Update(sFilter);
+                foreach(KeyValuePair<Type, IComponent> kvp in sFilter.rescWrite)
+                {
+                    resourceLUT[kvp.Key] = kvp.Value;
+                }
             });
             sThread.Start();
             threads.Add(sThread);
         }
-        foreach(Thread t in threads)
+        foreach (Thread t in threads)
         {
             t.Join();
         }
     }
+
+    internal void RunUpdateSystems()
+    {
+        foreach(List<ISystem> sysGroup in scheduledSystems)
+        {
+            RunUpdateSystemGroup(sysGroup);
+        }
+    }
+
+    public void StartSystems()
+    {
+        ScheduleSystems();
+        while (true)
+        {
+            RunUpdateSystems();
+        }
+    }
+
+    public void StartSystems(int updates)
+    {
+        ScheduleSystems();
+        for (int i = 0; i < updates; i++)
+        {
+            RunUpdateSystems();
+        }
+    }
+
+    public EntityConstructor AddEntity()
+    {
+        return entityManager.AddEntity();
+    }
+}
+
+public class UnregisteredDependency : Exception
+{
+    public ISystem t;
+    public UnregisteredDependency(ISystem _t)
+    {
+        t = _t;
+    }
+}
+public class UnregisteredComponentInSystem : Exception
+{
+    public Type t;
+    public UnregisteredComponentInSystem(Type _t)
+    {
+        t = _t;
+    }
+}
+public class NoEntityAccessError : Exception{};
+public class NoEntityDeleteAccessError : Exception { };
+
+#endregion
+
+public class World
+{
+
+    public List<SystemCollection> systemCollections;
+
+    public World()
+    {
+        systemCollections = new List<SystemCollection>();
+    }
+
 }
